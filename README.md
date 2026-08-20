@@ -7,6 +7,13 @@ Chinese / English scene text. This wrapper exposes **four runtime paths**
 through a single typed `recognize()` / `recognize_batch()` API and lets
 you flip between them with one constructor flag.
 
+> **Major credit:** the `v6` and `gpu_v10` engines — and most of the
+> benchmarking numbers in this README — were derived from the
+> [`agentocr`](https://github.com/anthropic-experiments/agentocr)
+> project's multi-week ablation sweep on RCTW-171 (PRODUCTION_GUIDE.md,
+> gpu_v10_ocr.py, dense_2560_experiment.py, verify_v6_100_omp1.py).
+> See [Acknowledgments](#acknowledgments).
+
 | `engine_kind`   | what it is                                        | hardware | F1 (RCTW)    | s/img  | models         |
 |-----------------|---------------------------------------------------|----------|--------------|--------|----------------|
 | `mobile`        | legacy PaddleOCR mobile (default 960, thresh 0.6) | CPU      | 0.4494       | 2.4    | 12 MB          |
@@ -34,6 +41,7 @@ pick `engine_kind="gpu_v10"` for ~10× speed at similar accuracy.
 - [Preprocessing parameters](#preprocessing-parameters)
 - [Limitations](#limitations)
 - [Files](#files)
+- [Acknowledgments](#acknowledgments)
 - [License](#license)
 
 ---
@@ -120,7 +128,7 @@ compared to mobile det. **F1 ≈ 0.55 on RCTW first-10.**
 
 ### `v6` ⭐ — recommended CPU path
 
-The agentocr team's RCTW-171 sweep identified that the optimal CPU
+The **agentocr** team's RCTW-171 sweep identified that the optimal CPU
 config is **not** either pure mobile or pure server, but a **hybrid**:
 
 - `det_model_dir = ch_PP-OCRv4_det_infer` (mobile det, 12 MB)
@@ -135,10 +143,19 @@ s/img — almost 2× the legacy `mobile` F1 for ~4× the time, and still
 ~3× faster than the legacy `server` kind. The mobile-det + server-rec
 hybrid is the core trick; the 1920 + 0.3 recovery adds the rest.
 
+> *Source: `agentocr/workspace/PRODUCTION_GUIDE.md` + the three
+> independent ablation sweeps (`dense_2560_experiment.py`,
+> `verify_v6_100_omp1.py`, `run_v6minimax_train_50_99.py`) — same
+> params, independently re-derived. OMP=1 setting from
+> `compare_omp1_lean.py`.*
+
 ### `gpu_v10` — ONNX Runtime + MIGraphX
 
 The same PP-OCRv4 family converted to ONNX and run on AMD ROCm via
-MIGraphX (with a CPU fallback). Ported from agentocr's `gpu_v10_ocr.py`.
+MIGraphX (with a CPU fallback). **Ported from
+[`agentocr/workspace/gpu_v10_ocr.py`](https://github.com/anthropic-experiments/agentocr/blob/main/workspace/gpu_v10_ocr.py)**
+with the same DB-postprocess constants, dual-width rec batching
+(480/1280), and MIGraphX-compensation box_thresh=0.7.
 
 - det: `ch_PP-OCRv4_det_mobile.onnx` — 32-align resize, fixed 1920
   canvas, original DB postprocess
@@ -375,6 +392,37 @@ tmp_jpg = preprocess_image("big.tif", max_long=2048, jpg_quality=85)
 
 Tests: `PYTHONPATH=. python -m unittest discover -s tests -p 'test_engine.py'`
 → 17 tests, all pass (2 skipped for env-gated integration).
+
+---
+
+## Acknowledgments
+
+Most of the engineering in this repo is **ported from
+[`agentocr`](https://github.com/anthropic-experiments/agentocr)** — a
+multi-week ablation sweep on RCTW-171 that systematically worked out
+PP-OCRv4's CPU and GPU sweet spots. Without that work, this wrapper
+would still be running with PaddleOCR's defaults (F1 ≈ 0.45).
+
+Specific sources, by engine:
+
+| this repo                                | upstream                                                                |
+|------------------------------------------|-------------------------------------------------------------------------|
+| `engine_kind="v6"` (CPU optimal config)  | `agentocr/workspace/PRODUCTION_GUIDE.md` + the three independent ablation sweeps (`dense_2560_experiment.py`, `verify_v6_100_omp1.py`, `run_v6minimax_train_50_99.py`). OMP=1 setting from `compare_omp1_lean.py`. |
+| `engine_kind="gpu_v10"` (ONNX + MIGraphX) | `agentocr/workspace/gpu_v10_ocr.py` — det preprocess (32-align + 1920 canvas), DB postprocess, dual-width rec batching (480/1280), MIGraphX box_thresh compensation, OMP-aware warmup. Eval methodology from `gpu_v10_eval.py`. |
+| `max_long=4096`, `jpg_quality=90`        | Originally measured in `pp_ocrv4_mobile_engine`'s own RCTW first-10 sweep (pre-`agentocr` history). |
+| `engine_kind="mobile"` / `"server"`      | Vanilla PaddleOCR 2.7 defaults — kept for backward compatibility only. |
+
+If you're working on PP-OCRv4 / PP-OCRv5 / PaddleOCR variants, the
+agentocr project has a much deeper analysis (LLM postprocessing layers,
+image-feature routing, MiniMax-M3 fusion experiments) that this small
+wrapper deliberately does **not** reproduce — it focuses only on the
+local-CPU / local-GPU inference path.
+
+Thanks also to:
+
+- **PaddlePaddle / PaddleOCR team** for the underlying PP-OCRv4 models
+  and `PaddleOCR` Python API.
+- **ONNX Runtime + AMD MIGraphX teams** for the GPU inference path.
 
 ---
 
