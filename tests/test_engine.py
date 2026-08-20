@@ -33,6 +33,10 @@ from pp_ocrv4_mobile_engine import (  # noqa: E402
     PaddleMobileEngine,
     preprocess_image,
 )
+try:
+    from pp_ocrv4_mobile_engine import GPUV10Engine  # noqa: E402
+except ImportError:
+    GPUV10Engine = None  # type: ignore[assignment]
 from pp_ocrv4_mobile_engine.engine import _parse_pages  # noqa: E402
 
 
@@ -142,6 +146,30 @@ class TestEngineValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             PaddleMobileEngine(max_long=64)
 
+    def test_gpu_v10_kind_in_valid_kinds(self):
+        # gpu_v10 must be a valid kind even when the runtime deps are
+        # missing — only construction triggers the import.
+        self.assertIn("gpu_v10", PaddleMobileEngine.VALID_KINDS)
+
+
+# ---------------------------------------------------------------------------
+# gpu_v10 静态校验 — 不需要模型权重
+# ---------------------------------------------------------------------------
+
+@unittest.skipIf(GPUV10Engine is None, "onnxruntime / pyclipper / shapely not available")
+class TestGPUV10Validation(unittest.TestCase):
+    def test_missing_model_dir_raises(self):
+        with self.assertRaises(FileNotFoundError):
+            GPUV10Engine(model_dir="/nonexistent/dir/does/not/exist")
+
+    def test_invalid_det_size(self):
+        with self.assertRaises(ValueError):
+            GPUV10Engine(det_size=64)
+
+    def test_invalid_jpg_quality(self):
+        with self.assertRaises(ValueError):
+            GPUV10Engine(jpg_quality=200)
+
 
 # ---------------------------------------------------------------------------
 # Integration — only when an actual image is available
@@ -171,6 +199,51 @@ class TestEngineIntegration(unittest.TestCase):
         self.assertIsInstance(result.boxes, list)
         self.assertGreaterEqual(len(result.lines), 0)
         self.assertGreater(result.elapsed_s, 0.0)
+        for box in result.boxes:
+            self.assertEqual(len(box.bbox), 4)
+
+
+@unittest.skipIf(GPUV10Engine is None, "onnxruntime / pyclipper / shapely not available")
+class TestGPUV10Integration(unittest.TestCase):
+    """Runs the real GPU V10 engine on a provided image; skipped otherwise.
+
+    Set ``PP_OCR_ENGINE_TEST_IMAGE=/path/to/image.jpg`` AND
+    ``PP_OCR_GPU_V10_MODEL_DIR=/path/to/onnx/dir`` to enable.  Requires the
+    three ONNX files to be present.  Only structural checks — no F1
+    assertion.
+    """
+
+    IMAGE_ENV = "PP_OCR_ENGINE_TEST_IMAGE"
+    MODEL_DIR_ENV = "PP_OCR_GPU_V10_MODEL_DIR"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.image = os.environ.get(cls.IMAGE_ENV)
+        cls.model_dir = os.environ.get(cls.MODEL_DIR_ENV)
+        if cls.image is None or cls.model_dir is None:
+            raise unittest.SkipTest(
+                f"{cls.IMAGE_ENV} / {cls.MODEL_DIR_ENV} not set"
+            )
+
+    def test_gpu_v10_via_facade(self):
+        engine = PaddleMobileEngine(
+            engine_kind="gpu_v10",
+            use_gpu=False,  # CPU provider is always available
+            model_dir=self.model_dir,
+        )
+        result = engine.recognize(self.image)
+        self.assertIsInstance(result, OCRResult)
+        self.assertIsInstance(result.lines, list)
+        self.assertGreaterEqual(len(result.lines), 0)
+        self.assertGreater(result.elapsed_s, 0.0)
+
+    def test_gpu_v10_direct(self):
+        engine = GPUV10Engine(use_gpu=False, model_dir=self.model_dir)
+        result = engine.recognize(self.image)
+        self.assertIsInstance(result, OCRResult)
+        # rec returns lines in image's reading order; just make sure the
+        # engine didn't crash.
+        self.assertIsInstance(result.lines, list)
         for box in result.boxes:
             self.assertEqual(len(box.bbox), 4)
 

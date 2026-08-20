@@ -7,6 +7,7 @@ Examples
     python -m pp_ocrv4_mobile_engine --image photo.jpg
     python -m pp_ocrv4_mobile_engine --image-dir ./imgs --kind mobile --out results.json
     python -m pp_ocrv4_mobile_engine --image-dir ./imgs --jsonl --kind server
+    python -m pp_ocrv4_mobile_engine --image-dir ./imgs --kind gpu_v10 --use-gpu
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from .engine import DEFAULT_JPG_QUALITY, DEFAULT_MAX_LONG, PaddleMobileEngine
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="pp-ocrv4-mobile-engine",
-        description="PP-OCRv4 (mobile/server) OCR engine — single CLI.",
+        description="PP-OCRv4 (mobile/server/gpu_v10) OCR engine — single CLI.",
     )
     ap.add_argument("--image", help="single image to OCR")
     ap.add_argument("--image-dir", help="directory of images to OCR (jpg/jpeg/png/webp/bmp)")
@@ -29,7 +30,11 @@ def main(argv: list[str] | None = None) -> int:
         "--kind",
         choices=PaddleMobileEngine.VALID_KINDS,
         default="mobile",
-        help="which PP-OCRv4 weight set to load (default: mobile)",
+        help=(
+            "which PP-OCRv4 weight set / runtime to use.  "
+            "'mobile' / 'server' = PaddleOCR CPU path; "
+            "'gpu_v10' = ONNX Runtime + MIGraphX (or CPU fallback)."
+        ),
     )
     ap.add_argument(
         "--max-long",
@@ -46,7 +51,26 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--use-gpu",
         action="store_true",
-        help="attempt GPU inference (PaddlePaddle's own CUDA path; not benchmarked here)",
+        help=(
+            "attempt GPU inference.  For --kind gpu_v10 this enables MIGraphX "
+            "(falls back to ROCM then CPU).  For --kind mobile/server it "
+            "forwards to PaddleOCR's own GPU flag (rarely reliable in practice)."
+        ),
+    )
+    ap.add_argument(
+        "--model-dir",
+        default=None,
+        help=(
+            "(gpu_v10 only) directory containing det_mobile.onnx, "
+            "rec_server.onnx and cls_mobile.onnx.  Defaults to the path "
+            "used by agentocr."
+        ),
+    )
+    ap.add_argument(
+        "--det-size",
+        type=int,
+        default=None,
+        help="(gpu_v10 only) detection input canvas side (default 1920).",
     )
     ap.add_argument(
         "--out",
@@ -72,12 +96,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"no images found under {args.image_dir}", file=sys.stderr)
             return 1
 
-    engine = PaddleMobileEngine(
+    kwargs: dict = dict(
         engine_kind=args.kind,
         use_gpu=args.use_gpu,
         max_long=args.max_long,
         jpg_quality=args.jpg_quality,
     )
+    if args.model_dir is not None:
+        kwargs["model_dir"] = args.model_dir
+    if args.det_size is not None:
+        kwargs["det_size"] = args.det_size
+
+    engine = PaddleMobileEngine(**kwargs)
     results = engine.recognize_batch(paths)
 
     payload = [r.to_dict() for r in results]

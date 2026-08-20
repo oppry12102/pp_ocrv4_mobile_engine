@@ -92,6 +92,10 @@ from typing import Iterable, Sequence
 
 import cv2
 
+# ``GPUV10Engine`` lives in ``gpu_v10.py``; we don't import it here at
+# top-level so the package can still be imported on systems without
+# onnxruntime / pyclipper / shapely (those are only needed when the
+# user picks engine_kind='gpu_v10').
 __all__ = [
     "DEFAULT_MAX_LONG",
     "DEFAULT_JPG_QUALITY",
@@ -308,18 +312,31 @@ class PaddleMobileEngine:
 
     Parameters
     ----------
-    engine_kind : {'mobile', 'server'}
-        Which PP-OCRv4 weight set to load.  Server is +5% F1 absolute but
-        11× slower on CPU.  Both share the same ``.recognize`` API.
+    engine_kind : {'mobile', 'server', 'gpu_v10'}
+        Which PP-OCRv4 weight set / runtime to use:
+
+        * ``'mobile'`` (default) — PaddleOCR mobile checkpoint on CPU.
+          ~2.4s/img, F1 ≈ 0.45 on RCTW first-10.
+        * ``'server'`` — PaddleOCR server checkpoint on CPU.  +5% F1 absolute
+          but ~11× slower (≈27 s/img).
+        * ``'gpu_v10'`` — ONNX Runtime + MIGraphX path, same accuracy as
+          agentocr ``gpu_v10_ocr.py``: F1 ≈ 0.70 on RCTW-171 50-149 at
+          ~0.24 s/img on this ROCm box (CPU fallback if MIGraphX absent).
+
+        All three share the same ``.recognize`` API and return
+        :class:`OCRResult`.
     lang : str
         Passed to :class:`paddleocr.PaddleOCR`.  Defaults to ``'ch'``.
+        Ignored when ``engine_kind='gpu_v10'``.
     use_angle_cls : bool
         Pass ``True`` to enable the 0/180° text-direction classifier
-        (recommended for scenes with rotated signs).
+        (recommended for scenes with rotated signs).  Always on for
+        ``'gpu_v10'``.
     use_gpu : bool
-        Pass ``True`` to attempt GPU inference.  On this Linux + ROCm box
-        PaddleOCR's GPU path is unreliable; CPU is the default and what we
-        benchmarked.
+        Pass ``True`` to attempt GPU inference.  ``engine_kind='gpu_v10'``
+        uses MIGraphX (AMD ROCm) via ONNX Runtime and falls back to CPU
+        when MIGraphX is missing; for the Paddle path the GPU option is
+        forwarded to PaddleOCR as-is.
     max_long : int
         Longest edge cap for the preprocessed image.  See
         :data:`DEFAULT_MAX_LONG`.
@@ -327,17 +344,23 @@ class PaddleMobileEngine:
         JPEG quality of the preprocessed image.  See
         :data:`DEFAULT_JPG_QUALITY`.
     show_log : bool
-        Forwarded to :class:`paddleocr.PaddleOCR` (default: ``False`` —
-        Paddle's own logger is very chatty).
+        Forwarded to the underlying runtime (default: ``False``).
     det_model_dir / rec_model_dir / cls_model_dir : str | None
-        Override the default model directory for each head.  When ``None``
-        the engine picks the canonical PP-OCRv4 path matching
-        ``engine_kind``.
+        Override the default model directory for each head (Paddle path
+        only).
+    model_dir : str | None
+        ``engine_kind='gpu_v10'`` only.  Directory containing the three
+        ``.onnx`` files (det_mobile, rec_server, cls_mobile).  See
+        :data:`gpu_v10.DEFAULT_MODEL_DIR`.
+    det_size : int | None
+        ``engine_kind='gpu_v10'`` only.  Detection input canvas side.
+        Defaults to :data:`gpu_v10.DET_LIMIT` (1920).
     """
 
     ENGINE_KIND_MOBILE = "mobile"
     ENGINE_KIND_SERVER = "server"
-    VALID_KINDS = ("mobile", "server")
+    ENGINE_KIND_GPU_V10 = "gpu_v10"
+    VALID_KINDS = ("mobile", "server", "gpu_v10")
 
     def __init__(
         self,
@@ -352,6 +375,8 @@ class PaddleMobileEngine:
         det_model_dir: str | None = None,
         rec_model_dir: str | None = None,
         cls_model_dir: str | None = None,
+        model_dir: str | None = None,
+        det_size: int | None = None,
     ) -> None:
         if engine_kind not in self.VALID_KINDS:
             raise ValueError(
@@ -372,6 +397,29 @@ class PaddleMobileEngine:
         self.max_long = int(max_long)
         self.jpg_quality = int(jpg_quality)
 
+        # GPU V10 path — defer import so users without onnxruntime / pyclipper
+        # / shapely can still use the CPU path.
+        if engine_kind == self.ENGINE_KIND_GPU_V10:
+            from .gpu_v10 import _get_or_build_gpu_v10
+            kw: dict = dict(
+                use_gpu=use_gpu,
+                max_long=self.max_long,
+                jpg_quality=self.jpg_quality,
+                show_log=show_log,
+            )
+            if model_dir is not None:
+                kw["model_dir"] = model_dir
+            if det_size is not None:
+                kw["det_size"] = det_size
+            self._engine_impl: object = _get_or_build_gpu_v10(**kw)
+            # The two engines share an interface but live in different
+            # classes; tag the impl so __repr__ / introspection stay
+            # honest.
+            self._impl_kind = "gpu_v10"
+            return
+
+        # Paddle path
+        self._impl_kind = "paddle"
         self._ocr = _get_or_build_paddle(
             engine_kind=engine_kind,
             lang=lang,
@@ -409,6 +457,12 @@ class PaddleMobileEngine:
         :class:`OCRResult` with ``.lines`` (``list[str]``),
         ``.boxes`` (``list[OCRLine]``) and ``.elapsed_s``.
         """
+        # GPU V10 path: delegate entirely to the ONNX impl.
+        if self._impl_kind == "gpu_v10":
+            return self._engine_impl.recognize(
+                image, max_long=max_long, jpg_quality=jpg_quality
+            )
+
         image_str = str(image)
         # Per-call overrides captured here so the cache + reused instance
         # remain stable across calls.
@@ -449,6 +503,9 @@ class PaddleMobileEngine:
         PaddleOCR's underlying CLI is not thread-safe in 2.7, so this is a
         sequential loop.  For moderate workloads (≤10k images) that's
         typically fine.  Parallelism is best done at the process boundary.
+        The ``gpu_v10`` kind has the same sequential shape — MIGraphX
+        sessions are process-singleton and not safe to share across
+        processes.
 
         Parameters
         ----------
@@ -459,6 +516,15 @@ class PaddleMobileEngine:
         """
         if on_error not in ("empty", "raise"):
             raise ValueError("on_error must be 'empty' or 'raise'")
+
+        # GPU V10 path: the impl already has its own batch helper.
+        if self._impl_kind == "gpu_v10":
+            return self._engine_impl.recognize_batch(
+                images,
+                max_long=max_long,
+                jpg_quality=jpg_quality,
+                on_error=on_error,
+            )
 
         results: list[OCRResult] = []
         n_total = 0
@@ -503,6 +569,9 @@ class PaddleMobileEngine:
         return {Path(r.image_path).name: r.lines for r in results}
 
     def __repr__(self) -> str:
+        if self._impl_kind == "gpu_v10":
+            inner = repr(self._engine_impl)
+            return f"PaddleMobileEngine(engine_kind='gpu_v10', impl={inner})"
         return (
             f"PaddleMobileEngine(kind={self.engine_kind!r}, lang={self.lang!r}, "
             f"use_gpu={self.use_gpu}, max_long={self.max_long}, "
