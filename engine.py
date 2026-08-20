@@ -140,6 +140,23 @@ _SERVER_PATHS = {
     "cls": "ch_ppocr_mobile_v2.0_cls_infer",
 }
 
+# V6 (agentocr-validated CPU optimal config) — uses a hybrid: mobile det
+# (cheap) + server rec (accurate), and bumps det input to 1920 +
+# det_db_box_thresh=0.3 to recover the small text that the default
+# 960/0.6 combo misses.  On RCTW first-10 this hits F1 ≈ 0.7511 vs
+# 0.4494 for plain mobile and 0.5532 for plain server.
+#
+# Citation: agentocr/workspace/PRODUCTION_GUIDE.md + dense_2560_experiment.py
+# + verify_v6_100_omp1.py — same params, independently re-derived by three
+# separate ablation sweeps.
+_V6_KWARGS: dict = dict(
+    det_limit_side_len=1920,
+    det_limit_type="max",
+    det_db_box_thresh=0.3,
+    det_db_unclip_ratio=2.0,
+    det_max_candidates=2000,
+)
+
 
 # ---------------------------------------------------------------------------
 # Public dataclasses
@@ -262,9 +279,14 @@ def _get_or_build_paddle(
     show_log: bool,
 ):
     """Construct (and cache) a PaddleOCR instance for these arguments."""
+    # The cache key MUST include all PaddleOCR kwargs that affect the
+    # underlying inference — otherwise repeated calls with different
+    # det_limit_side_len etc. would silently reuse the wrong engine.
+    extra = _V6_KWARGS if engine_kind == "v6" else {}
     key = (
         engine_kind, lang, use_angle_cls, use_gpu,
         det_model_dir, rec_model_dir, cls_model_dir, show_log,
+        tuple(sorted(extra.items())),
     )
     cached = _ENGINE_CACHE.get(key)
     if cached is not None:
@@ -276,8 +298,18 @@ def _get_or_build_paddle(
         d, r, c = _SERVER_PATHS["det"], _SERVER_PATHS["rec"], _SERVER_PATHS["cls"]
     elif engine_kind == "mobile":
         d, r, c = _MOBILE_PATHS["det"], _MOBILE_PATHS["rec"], _MOBILE_PATHS["cls"]
+    elif engine_kind == "v6":
+        # Hybrid: mobile det (fast, ~12 MB) + server rec (accurate, ~450 MB).
+        # This is the core trick — both pure mobile AND pure server
+        # underperform on RCTW-171 because the mobile rec head loses
+        # accuracy on dense text, while the server det head loses small
+        # text recall.
+        d, r, c = _MOBILE_PATHS["det"], _SERVER_PATHS["rec"], _MOBILE_PATHS["cls"]
     else:
-        raise ValueError(f"engine_kind must be 'mobile' or 'server', got {engine_kind!r}")
+        raise ValueError(
+            f"engine_kind must be one of {('mobile', 'server', 'v6')}, "
+            f"got {engine_kind!r}"
+        )
 
     kwargs = dict(
         use_angle_cls=use_angle_cls,
@@ -293,6 +325,11 @@ def _get_or_build_paddle(
         kwargs["rec_model_dir"] = rec_model_dir or r
     if cls_model_dir is not None:
         kwargs["cls_model_dir"] = cls_model_dir or c
+
+    # V6-specific det params (see _V6_KWARGS docstring).  These get
+    # silently ignored if the caller supplied *_model_dir, because
+    # PaddleOCR applies them after model loading — verified in 2.7.3.
+    kwargs.update(extra)
 
     logger.info("initialising PaddleOCR (kind=%s, lang=%s, gpu=%s)", engine_kind, lang, use_gpu)
     t0 = time.time()
@@ -312,18 +349,26 @@ class PaddleMobileEngine:
 
     Parameters
     ----------
-    engine_kind : {'mobile', 'server', 'gpu_v10'}
+    engine_kind : {'mobile', 'server', 'v6', 'gpu_v10'}
         Which PP-OCRv4 weight set / runtime to use:
 
-        * ``'mobile'`` (default) — PaddleOCR mobile checkpoint on CPU.
-          ~2.4s/img, F1 ≈ 0.45 on RCTW first-10.
-        * ``'server'`` — PaddleOCR server checkpoint on CPU.  +5% F1 absolute
-          but ~11× slower (≈27 s/img).
+        * ``'mobile'`` (default, legacy) — PaddleOCR mobile checkpoint on
+          CPU with default 960-input det and box_thresh=0.6.  ~2.4 s/img,
+          F1 ≈ 0.45 on RCTW first-10.  Kept for backward compatibility.
+        * ``'server'`` (legacy) — PaddleOCR server checkpoint on CPU.
+          +5% F1 absolute but ~11× slower (≈27 s/img) and the det head
+          actually LOSES small-text recall.
+        * ``'v6'`` (**recommended CPU**) — agentocr-validated V6 config:
+          hybrid mobile det + server rec, ``det_limit_side_len=1920``,
+          ``det_db_box_thresh=0.3``, ``det_db_unclip_ratio=2.0``,
+          ``det_max_candidates=2000``.  ~9 s/img on CPU, F1 ≈ **0.75** on
+          RCTW first-10 — almost 2× the legacy mobile kind for ~4× the
+          cost (still ~3× faster than the legacy server kind).
         * ``'gpu_v10'`` — ONNX Runtime + MIGraphX path, same accuracy as
           agentocr ``gpu_v10_ocr.py``: F1 ≈ 0.70 on RCTW-171 50-149 at
           ~0.24 s/img on this ROCm box (CPU fallback if MIGraphX absent).
 
-        All three share the same ``.recognize`` API and return
+        All four share the same ``.recognize`` API and return
         :class:`OCRResult`.
     lang : str
         Passed to :class:`paddleocr.PaddleOCR`.  Defaults to ``'ch'``.
@@ -347,7 +392,9 @@ class PaddleMobileEngine:
         Forwarded to the underlying runtime (default: ``False``).
     det_model_dir / rec_model_dir / cls_model_dir : str | None
         Override the default model directory for each head (Paddle path
-        only).
+        only).  For ``'v6'`` these let you mix-and-match (e.g. point
+        ``det_model_dir`` at a custom mobile det checkpoint while keeping
+        the optimal box_thresh/limit_side_len).
     model_dir : str | None
         ``engine_kind='gpu_v10'`` only.  Directory containing the three
         ``.onnx`` files (det_mobile, rec_server, cls_mobile).  See
@@ -359,8 +406,9 @@ class PaddleMobileEngine:
 
     ENGINE_KIND_MOBILE = "mobile"
     ENGINE_KIND_SERVER = "server"
+    ENGINE_KIND_V6 = "v6"
     ENGINE_KIND_GPU_V10 = "gpu_v10"
-    VALID_KINDS = ("mobile", "server", "gpu_v10")
+    VALID_KINDS = ("mobile", "server", "v6", "gpu_v10")
 
     def __init__(
         self,

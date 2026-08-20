@@ -1,16 +1,17 @@
 # pp-ocrv4-mobile-engine
 
 **A small, well-wrapped production OCR interface around PP-OCRv4
-(mobile / server via PaddleOCR, or `gpu_v10` via ONNX Runtime + MIGraphX).**
+(mobile / server / v6 via PaddleOCR, or `gpu_v10` via ONNX Runtime + MIGraphX).**
 
 PP-OCRv4 (PaddlePaddle) is the strongest **CPU** OCR stack for mixed
-Chinese/English scene text; the same checkpoints converted to ONNX and
-run on AMD ROCm via MIGraphX (the `gpu_v10` engine, ported from
-`../agentocr/workspace/gpu_v10_ocr.py`) reach the **same accuracy at
-~10× the speed**. This wrapper exposes both paths through one
-`recognize()` / `recognize_batch()` API with typed returns, and lets
-you flip between mobile, server, and `gpu_v10` with a single constructor
-flag.
+Chinese/English scene text. The `v6` engine (mobile det @ 1920 + server
+rec + box_thresh=0.3, ported from agentocr's PRODUCTION_GUIDE) reaches
+**F1 ≈ 0.75 on RCTW first-10 on CPU alone** — almost 2× the legacy
+`mobile` default.  The same checkpoints converted to ONNX and run on AMD
+ROCm via MIGraphX (`gpu_v10`) hit **~10× the speed** at comparable
+accuracy. This wrapper exposes all four paths through one `recognize()`
+/ `recognize_batch()` API with typed returns, and lets you flip between
+them with a single constructor flag.
 
 ## Why this wrapper exists
 
@@ -63,16 +64,22 @@ to `~/.paddleocr/whl/`.
 ```python
 from pp_ocrv4_mobile_engine import PaddleMobileEngine
 
-# Mobile — 12 MB, ~2.4 s/img on CPU, F1 ≈ 0.45 on RCTW first-10
+# Legacy mobile — 12 MB, ~2.4 s/img on CPU, F1 ≈ 0.45 on RCTW first-10
 engine = PaddleMobileEngine()
 result = engine.recognize("sign.jpg")
 print(result.lines)         # list[str]
 print(result.boxes)         # list[OCRLine] with text/conf/bbox
 print(f"{result.elapsed_s:.2f}s, {len(result.lines)} lines")
 
-# Server — 450 MB, ~27 s/img on CPU, F1 ≈ 0.55 on RCTW first-10
+# Legacy server — 450 MB, ~27 s/img on CPU, F1 ≈ 0.55 on RCTW first-10
 engine_srv = PaddleMobileEngine(engine_kind="server")
 print(engine_srv.recognize("sign.jpg").lines)
+
+# V6 (recommended CPU) — mobile det @ 1920 + server rec, ~9 s/img,
+# F1 ≈ 0.75 on RCTW first-10.  Almost 2x the legacy mobile F1 for ~4x
+# the time.  Add the suggested env vars below for best determinism.
+engine_v6 = PaddleMobileEngine(engine_kind="v6", use_gpu=False)
+print(engine_v6.recognize("sign.jpg").lines)
 
 # GPU V10 — ONNX Runtime + MIGraphX, F1 ≈ 0.70 on RCTW-171 50-149
 # at ~0.24 s/img.  Requires onnxruntime + pyclipper + shapely
@@ -82,7 +89,7 @@ engine_v10 = PaddleMobileEngine(engine_kind="gpu_v10", use_gpu=True)
 print(engine_v10.recognize("sign.jpg").lines)
 ```
 
-Batch API returns the same shape across all three engines:
+Batch API returns the same shape across all four engines:
 
 ```python
 results = engine.recognize_batch(
@@ -103,12 +110,25 @@ texts = engine.recognize_batch_text(["img/01.jpg", "img/02.jpg"])
 This dict shape matches what `score_rctw_universal.score_results()`
 reads, so you can pipe engine output straight into the scorer.
 
+### Recommended env for `engine_kind="v6"`
+
+PaddleOCR 2.7's OpenMP backend occasionally SIGSEGVs on large images
+when run with multiple threads.  Single-threaded is also empirically
+faster on RCTW first-10 (agentocr measured 9.3 vs 13 s/img):
+
+```bash
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+```
+
 ## CLI
 
 ```bash
 python -m pp_ocrv4_mobile_engine --image photo.jpg --kind mobile
 python -m pp_ocrv4_mobile_engine --image-dir ./imgs --kind mobile --out results.json
 python -m pp_ocrv4_mobile_engine --image-dir ./imgs --kind server --jsonl --out results.jsonl
+OMP_NUM_THREADS=1 python -m pp_ocrv4_mobile_engine --image-dir ./imgs --kind v6 --out v6.json
 python -m pp_ocrv4_mobile_engine --image-dir ./imgs --kind gpu_v10 --use-gpu --jsonl --out v10.jsonl
 python -m pp_ocrv4_mobile_engine --image-dir ./imgs --max-long 2048 --jpg-quality 85
 ```
@@ -138,17 +158,24 @@ engine = PaddleMobileEngine(engine_kind="mobile", max_long=2048, jpg_quality=80)
 
 | engine_kind | benchmark | F1_s  | F1_l  | hits/GT | FP   | s/img | model size |
 |-------------|-----------|------:|------:|--------:|-----:|------:|-----------:|
-| **mobile**  | RCTW first-10 | 0.4494 | 0.4835 | 20/44 | 25 | 2.42 | 12 MB |
-| server      | RCTW first-10 | **0.5532** | 0.5532 | 26/44 | 24 | 27.30 | 450 MB |
-| **gpu_v10** | RCTW-171 50-149 (100 imgs) | **0.7008** | — | — | — | 0.24 | 95 MB ONNX |
+| **mobile** (legacy) | RCTW first-10 | 0.4494 | 0.4835 | 20/44 | 25 | 2.42 | 12 MB |
+| server (legacy)     | RCTW first-10 | 0.5532 | 0.5532 | 26/44 | 24 | 27.30 | 450 MB |
+| **v6** ⭐ (CPU)     | RCTW first-10 | **0.7511** | 0.7835 | — | — | 9.3 | 462 MB (hybrid) |
+| **gpu_v10**         | RCTW-171 50-149 (100 imgs) | 0.7008 | — | — | — | 0.24 | 95 MB ONNX |
 
-`gpu_v10` (ONNX + MIGraphX) is the same PP-OCRv4 model family but
-converted to ONNX and run on AMD ROCm: det_mobile + rec_server + cls
-head, dual-width rec batching (480/1280), 32-align resize + fixed
-1920-canvas pad for det, original DB postprocessing with
-`box_thresh=0.7` to compensate for MIGraphX's ~0.1-0.15 probability
-offset. **Compared to `mobile` (CPU): ~10× faster, +0.25 F1 absolute on
-RCTW-171.** CPU fallback works (loses speed, same accuracy).
+`v6` (recommended CPU): mobile det + server rec + 1920 input +
+`det_db_box_thresh=0.3` + `det_db_unclip_ratio=2.0` + 2000 candidates.
+Same PP-OCRv4 family, very different parametrisation.  +0.30 F1 absolute
+over the legacy mobile default for ~4× the cost — still ~3× faster than
+the legacy server kind.  Set `OMP_NUM_THREADS=1` for full benefit.
+
+`gpu_v10` (ONNX + MIGraphX): the same model family converted to ONNX and
+run on AMD ROCm — det_mobile + rec_server + cls head, dual-width rec
+batching (480/1280), 32-align resize + fixed 1920-canvas pad for det,
+original DB postprocessing with `box_thresh=0.7` to compensate for
+MIGraphX's ~0.1-0.15 probability offset. **Compared to `mobile` (CPU):
+~10× faster, +0.25 F1 absolute on RCTW-171.** CPU fallback works (loses
+speed, same accuracy).
 
 ### GPU V10 setup
 
@@ -173,12 +200,9 @@ same process reuse the compiled sessions — no re-compile.
 
 ## Limitations
 
-- **No GPU acceleration on the Paddle path.** PaddlePaddle's CUDA/CNCL
-  stack is shipped separately; `engine_kind="mobile"` / `"server"` use
-  the stable CPU path.  For PaddleGPU, follow Paddle's own instructions
-  for `paddleocr.PaddleOCR(use_gpu=True)` — or use the
-  `engine_kind="gpu_v10"` path which IS GPU-accelerated (AMD ROCm /
-  MIGraphX, CPU fallback).
+- **CPU Paddle path is slow by design.** `mobile` / `server` / `v6`
+  all run on CPU.  Use `engine_kind="gpu_v10"` for ~10× speedup on AMD
+  ROCm, or `engine_kind="v6"` for the best CPU F1.
 - **PaddleOCR 2.7 only.** Other versions sometimes change which
   checkpoint `lang="ch"` auto-selects. Pass
   `det_model_dir`/`rec_model_dir`/`cls_model_dir` explicitly if you
@@ -199,7 +223,7 @@ same process reuse the compiled sessions — no re-compile.
 
 | file                       | purpose                                                |
 |----------------------------|--------------------------------------------------------|
-| `engine.py`                | PaddleMobileEngine facade (single file, ~580 lines)     |
+| `engine.py`                | PaddleMobileEngine facade (single file, ~610 lines)    |
 | `gpu_v10.py`               | GPU V10 ONNX engine (det_mobile + rec_server + cls)    |
 | `__init__.py`              | public API re-exports                                  |
 | `cli.py` + `__main__.py`   | `python -m pp_ocrv4_mobile_engine` interface           |

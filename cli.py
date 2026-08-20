@@ -22,7 +22,7 @@ from .engine import DEFAULT_JPG_QUALITY, DEFAULT_MAX_LONG, PaddleMobileEngine
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="pp-ocrv4-mobile-engine",
-        description="PP-OCRv4 (mobile/server/gpu_v10) OCR engine — single CLI.",
+        description="PP-OCRv4 (mobile/server/v6/gpu_v10) OCR engine — single CLI.",
     )
     ap.add_argument("--image", help="single image to OCR")
     ap.add_argument("--image-dir", help="directory of images to OCR (jpg/jpeg/png/webp/bmp)")
@@ -32,7 +32,10 @@ def main(argv: list[str] | None = None) -> int:
         default="mobile",
         help=(
             "which PP-OCRv4 weight set / runtime to use.  "
-            "'mobile' / 'server' = PaddleOCR CPU path; "
+            "'mobile' / 'server' = legacy PaddleOCR CPU path; "
+            "'v6' = agentocr-validated V6 CPU config "
+            "(mobile det + server rec, 1920 input, box_thresh=0.3, "
+            "F1 ≈ 0.75 on RCTW first-10); "
             "'gpu_v10' = ONNX Runtime + MIGraphX (or CPU fallback)."
         ),
     )

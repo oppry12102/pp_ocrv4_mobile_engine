@@ -151,6 +151,24 @@ class TestEngineValidation(unittest.TestCase):
         # missing — only construction triggers the import.
         self.assertIn("gpu_v10", PaddleMobileEngine.VALID_KINDS)
 
+    def test_v6_kind_in_valid_kinds(self):
+        # v6 is the recommended CPU kind and must always be available.
+        self.assertIn("v6", PaddleMobileEngine.VALID_KINDS)
+
+
+class TestV6ConfigStatic(unittest.TestCase):
+    """Static checks on the V6 sweet-spot — no PaddleOCR import needed."""
+
+    def test_v6_kwargs_present(self):
+        from pp_ocrv4_mobile_engine.engine import _V6_KWARGS
+        # The five params that lift RCTW first-10 from 0.45 to 0.75
+        # (per agentocr ablation sweeps).
+        self.assertEqual(_V6_KWARGS["det_limit_side_len"], 1920)
+        self.assertEqual(_V6_KWARGS["det_limit_type"], "max")
+        self.assertEqual(_V6_KWARGS["det_db_box_thresh"], 0.3)
+        self.assertEqual(_V6_KWARGS["det_db_unclip_ratio"], 2.0)
+        self.assertEqual(_V6_KWARGS["det_max_candidates"], 2000)
+
 
 # ---------------------------------------------------------------------------
 # gpu_v10 静态校验 — 不需要模型权重
@@ -201,6 +219,17 @@ class TestEngineIntegration(unittest.TestCase):
         self.assertGreater(result.elapsed_s, 0.0)
         for box in result.boxes:
             self.assertEqual(len(box.bbox), 4)
+
+    def test_v6_returns_at_least_as_many_lines_as_mobile(self):
+        """V6 (1920 + box_thresh=0.3 + server rec) must recover any
+        small text that the legacy 960 mobile loses.  We assert the
+        weaker-but-still-useful invariant: v6 >= mobile on line count,
+        which is true for every image in our RCTW first-10 sweep."""
+        eng_mobile = PaddleMobileEngine(engine_kind="mobile", use_gpu=False)
+        eng_v6 = PaddleMobileEngine(engine_kind="v6", use_gpu=False)
+        m = eng_mobile.recognize(self.image)
+        v = eng_v6.recognize(self.image)
+        self.assertGreaterEqual(len(v.lines), len(m.lines))
 
 
 @unittest.skipIf(GPUV10Engine is None, "onnxruntime / pyclipper / shapely not available")
