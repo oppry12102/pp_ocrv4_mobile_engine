@@ -9,10 +9,9 @@ you flip between them with one constructor flag.
 
 > **Major credit:** the `v6` and `gpu_v10` engines — and most of the
 > benchmarking numbers in this README — were derived from the
-> [`agentocr`](https://github.com/anthropic-experiments/agentocr)
-> project's multi-week ablation sweep on RCTW-171 (PRODUCTION_GUIDE.md,
-> gpu_v10_ocr.py, dense_2560_experiment.py, verify_v6_100_omp1.py).
-> See [Acknowledgments](#acknowledgments).
+> **`agentocr`** autonomous agent's multi-week ablation sweep on
+> RCTW-171 (an instance of the [xuseek / 墟寻](xuseek.md) long-running
+> agent framework).  See [Acknowledgments](#acknowledgments).
 
 | `engine_kind`   | what it is                                        | hardware | F1 (RCTW)    | s/img  | models         |
 |-----------------|---------------------------------------------------|----------|--------------|--------|----------------|
@@ -128,8 +127,9 @@ compared to mobile det. **F1 ≈ 0.55 on RCTW first-10.**
 
 ### `v6` ⭐ — recommended CPU path
 
-The **agentocr** team's RCTW-171 sweep identified that the optimal CPU
-config is **not** either pure mobile or pure server, but a **hybrid**:
+The **`agentocr`** autonomous-agent's RCTW-171 sweep identified that
+the optimal CPU config is **not** either pure mobile or pure server,
+but a **hybrid**:
 
 - `det_model_dir = ch_PP-OCRv4_det_infer` (mobile det, 12 MB)
 - `rec_model_dir = ch_PP-OCRv4_rec_server_infer` (server rec, 450 MB)
@@ -153,7 +153,7 @@ hybrid is the core trick; the 1920 + 0.3 recovery adds the rest.
 
 The same PP-OCRv4 family converted to ONNX and run on AMD ROCm via
 MIGraphX (with a CPU fallback). **Ported from
-[`agentocr/workspace/gpu_v10_ocr.py`](https://github.com/anthropic-experiments/agentocr/blob/main/workspace/gpu_v10_ocr.py)**
+`agentocr/workspace/gpu_v10_ocr.py`**
 with the same DB-postprocess constants, dual-width rec batching
 (480/1280), and MIGraphX-compensation box_thresh=0.7.
 
@@ -397,11 +397,19 @@ Tests: `PYTHONPATH=. python -m unittest discover -s tests -p 'test_engine.py'`
 
 ## Acknowledgments
 
-Most of the engineering in this repo is **ported from
-[`agentocr`](https://github.com/anthropic-experiments/agentocr)** — a
-multi-week ablation sweep on RCTW-171 that systematically worked out
-PP-OCRv4's CPU and GPU sweet spots. Without that work, this wrapper
-would still be running with PaddleOCR's defaults (F1 ≈ 0.45).
+Most of the engineering in this repo is **ported from `agentocr`** —
+an autonomous LLM agent (an instance of the **xuseek / 墟寻**
+long-running agent framework) that spent multiple weeks on RCTW-171
+running ablation sweeps and working out PP-OCRv4's CPU and GPU sweet
+spots. Without that work, this wrapper would still be running with
+PaddleOCR's defaults (F1 ≈ 0.45).
+
+**What `agentocr` is:** an LLM-driven autonomous agent built on
+[xuseek](xuseek.md) — given a mission ("systematically improve PP-OCRv4
+accuracy on RCTW-171"), it writes its own tools, runs experiments, reads
+its own logs, and persists findings to its own `workspace/`.  This
+repo's `v6` and `gpu_v10` configs are the local-engineering distillation
+of that long-running session.
 
 Specific sources, by engine:
 
@@ -413,7 +421,7 @@ Specific sources, by engine:
 | `engine_kind="mobile"` / `"server"`      | Vanilla PaddleOCR 2.7 defaults — kept for backward compatibility only. |
 
 If you're working on PP-OCRv4 / PP-OCRv5 / PaddleOCR variants, the
-agentocr project has a much deeper analysis (LLM postprocessing layers,
+agentocr instance has a much deeper analysis (LLM postprocessing layers,
 image-feature routing, MiniMax-M3 fusion experiments) that this small
 wrapper deliberately does **not** reproduce — it focuses only on the
 local-CPU / local-GPU inference path.
@@ -423,6 +431,8 @@ Thanks also to:
 - **PaddlePaddle / PaddleOCR team** for the underlying PP-OCRv4 models
   and `PaddleOCR` Python API.
 - **ONNX Runtime + AMD MIGraphX teams** for the GPU inference path.
+- **xuseek / 墟寻** for the autonomous-agent framework that produced the
+  upstream research.
 
 ---
 
